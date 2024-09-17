@@ -7,7 +7,10 @@ import tildify from 'tildify';
 import { PassThrough } from 'stream';
 import { createSha1Hash } from 'hexo-util';
 import type Hexo from '../../hexo';
-import axios from 'axios';  // Importamos axios para la llamada a la API
+import axios from 'axios';
+import * as fs from 'fs';
+import * as folderpath from 'path';
+// Importamos axios para la llamada a la API
 
 interface GenerateArgs {
   f?: boolean
@@ -82,82 +85,119 @@ class Generater {
     const dataStream = this.wrapDataStream(route.get(path));
     const buffers = [];
     const hasher = createSha1Hash();
-
+  
     const finishedPromise = new Promise((resolve, reject) => {
       dataStream.once('error', reject);
       dataStream.once('end', resolve);
     });
-
+  
     // Get data => Cache data => Calculate hash
     dataStream.on('data', chunk => {
       buffers.push(chunk);
       hasher.update(chunk);
     });
-
+  
     return finishedPromise.then(async () => {
       const dest = join(publicDir, path);
       const cacheId = `public/${path}`;
       const cache = Cache.findById(cacheId);
       const hash = hasher.digest('hex');
-
+  
       // Skip generating if hash is unchanged
       if (!force && cache && cache.hash === hash) {
         return;
       }
-
+  
       // Save new hash to cache
       await Cache.save({
         _id: cacheId,
         hash
       });
-
-      let content = Buffer.concat(buffers).toString();  // Get file content as string
-
-      // Extraemos el valor del atributo 'content' en meta tags con name='description'
-      const metaContentRegex = /<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i;
-      const match = metaContentRegex.exec(content);
-
-      let summary = 'No description content available';
-
-      // Solo llamamos a Gemini si 'content' en la meta tag está presente y no está vacío
-      if (match && match[1].trim()) {
-        const contentMeta = match[1].trim();
-
-        // Llamada a la API de Gemini para generar el resumen
-        const response = await axios.post(
-          'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyDMuWU-2pwUPczv8fyJ5l84czbExrZZC3k',
-          {
-            contents: [
-              {
-                parts: [
-                  {
-                    text: contentMeta // Enviamos el contenido del meta tag description a la API
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            headers: {
-              'Content-Type': 'application/json'
+  
+      let fileContent = Buffer.concat(buffers).toString();
+      // Get file content as string
+  
+      // Archivos a recorrer
+      const files = fs.readdirSync('source/_posts');
+  
+      // Usamos un bucle `for...of` para esperar correctamente las operaciones asíncronas dentro del bucle
+      for (const file of files) {
+        const filePath = folderpath.join('source/_posts', file);
+        let mdContent = fs.readFileSync(filePath, 'utf-8');
+  
+        // Verificamos si el archivo tiene un encabezado (front-matter)
+        const frontMatterRegex = /^---\n([\s\S]*?)\n---/;
+        const frontMatterMatch = mdContent.match(frontMatterRegex);
+  
+        // Verificamos si ya contiene un resumen
+        if (!mdContent.includes('Summary:')) {
+          let postContent = mdContent;
+  
+          // Si hay front-matter, extraemos solo el contenido del post
+          if (frontMatterMatch) {
+            postContent = mdContent.slice(frontMatterMatch[0].length).trim(); // Contenido sin el front-matter
+  
+            // Verificamos si el contenido del post está vacío o contiene solo espacios
+            if (!postContent) {
+              log.info('El archivo %s no tiene contenido después del front-matter. No se generará resumen.', magenta(filePath));
+              continue; // Saltamos a la siguiente iteración si no hay contenido
             }
           }
-        );
-
-        // Verificamos la respuesta y obtenemos el resumen generado por Gemini
-        summary = response.data.candidates[0].content.parts[0].text;
-        log.info('Resumen generado por Gemini para %s: %s', magenta(path), summary);
-      } else {
-        log.info('No se encontró contenido en la meta descripción para %s. No se generó resumen.', magenta(path));
+          // Definimos el nuevo prompt para la IA
+          const prompt = `
+            Para una aplicación de generación de blogs, se desea tener al inicio de la página el resumen de la nueva entrada para el blog. 
+            A partir del siguiente texto, da el resumen que se debe poner al inicio para que los usuarios sepan de qué se trata. 
+            Evita poner cualquier cosa que no corresponda a lo que sería un resumen.
+            
+            Texto: ${postContent}
+          `;
+          // Generamos el resumen usando la IA (Gemini)
+          const response = await axios.post(
+            'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=',
+            {
+              contents: [
+                {
+                  parts: [
+                    {
+                      text: prompt // Enviamos el contenido del post a la IA para generar el resumen
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+  
+          // Verificamos la respuesta y obtenemos el resumen generado por Gemini
+          const summary = response.data.candidates[0].content.parts[0].text;
+  
+          // Si se encuentra front-matter, inserta el resumen después de él
+          if (frontMatterMatch) {
+            const frontMatter = frontMatterMatch[0]; // Captura el bloque de front-matter
+            postContent = mdContent.slice(frontMatterMatch[0].length).trim(); // El resto del contenido del post
+  
+            // Creamos el nuevo contenido, insertando el resumen después del front-matter
+            mdContent = `${frontMatter}\n\nSummary: ${summary}\n\n${postContent}`;
+          } else {
+            // Si no hay front-matter, añadimos el resumen al principio del archivo
+            mdContent = `Summary: ${summary}\n\n${mdContent}`;
+          }
+  
+          // Escribir el nuevo contenido en el archivo
+          fs.writeFileSync(filePath, mdContent, 'utf-8');
+  
+          log.info('Resumen generado por Gemini para %s: %s', magenta(filePath), summary);
+        } else {
+          log.info('El archivo %s ya contiene un resumen.', magenta(filePath));
+        }
       }
-
-      // Insertamos el resumen después del div con clase "e-content article-entry"
-      const summaryTag = `<p>${summary}</p>`;
-      const divPattern = '<div class="e-content article-entry" itemprop="articleBody">';
-      content = content.replace(divPattern, `${divPattern}\n${summaryTag}`);
-
+  
       // Write cache data to public folder (actual HTML generation)
-      return writeFile(dest, Buffer.from(content)).then(() => {
+      return writeFile(dest, Buffer.from(fileContent)).then(() => {
         log.info('Generated: %s', magenta(path));
         return true;
       });
@@ -276,4 +316,3 @@ function generateConsole(this: Hexo, args: GenerateArgs = {}) {
 }
 
 export = generateConsole;
-  
