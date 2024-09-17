@@ -131,7 +131,7 @@ class Generater {
 
         // Llamada a la API de Gemini para generar el resumen
         const response = await axios.post(
-          'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyDMuWU-2pwUPczv8fyJ5l84czbExrZZC3k',
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=',
           {
             contents: [
               {
