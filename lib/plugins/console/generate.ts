@@ -7,6 +7,7 @@ import tildify from 'tildify';
 import { PassThrough } from 'stream';
 import { createSha1Hash } from 'hexo-util';
 import type Hexo from '../../hexo';
+import axios from 'axios';  // Importamos axios para la llamada a la API
 
 interface GenerateArgs {
   f?: boolean
@@ -44,10 +45,12 @@ class Generater {
     this.start = process.hrtime();
     this.args = args;
   }
-  generateFile(path: string) {
+
+  async generateFile(path: string) {
     const publicDir = this.context.public_dir;
     const { generatingFiles } = this;
     const { route } = this.context;
+
     // Skip if the file is generating
     if (generatingFiles.has(path)) return Promise.resolve();
 
@@ -71,7 +74,8 @@ class Generater {
       generatingFiles.delete(path);
     });
   }
-  writeFile(path: string, force?: boolean): Promise<any> {
+
+  async writeFile(path: string, force?: boolean): Promise<any> {
     const { route, log } = this.context;
     const publicDir = this.context.public_dir;
     const Cache = this.context.model('Cache');
@@ -90,7 +94,7 @@ class Generater {
       hasher.update(chunk);
     });
 
-    return finishedPromise.then(() => {
+    return finishedPromise.then(async () => {
       const dest = join(publicDir, path);
       const cacheId = `public/${path}`;
       const cache = Cache.findById(cacheId);
@@ -102,16 +106,64 @@ class Generater {
       }
 
       // Save new hash to cache
-      return Cache.save({
+      await Cache.save({
         _id: cacheId,
         hash
-      }).then(() => // Write cache data to public folder
-        writeFile(dest, Buffer.concat(buffers))).then(() => {
+      });
+
+      let content = Buffer.concat(buffers).toString();  // Get file content as string
+
+      // Extraemos el valor del atributo 'content' en meta tags con name='description'
+      const metaContentRegex = /<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i;
+      const match = metaContentRegex.exec(content);
+
+      let summary = 'No description content available';
+
+      // Solo llamamos a Gemini si 'content' en la meta tag está presente y no está vacío
+      if (match && match[1].trim()) {
+        const contentMeta = match[1].trim();
+
+        // Llamada a la API de Gemini para generar el resumen
+        const response = await axios.post(
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyDMuWU-2pwUPczv8fyJ5l84czbExrZZC3k',
+          {
+            contents: [
+              {
+                parts: [
+                  {
+                    text: contentMeta // Enviamos el contenido del meta tag description a la API
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        // Verificamos la respuesta y obtenemos el resumen generado por Gemini
+        summary = response.data.candidates[0].content.parts[0].text;
+        log.info('Resumen generado por Gemini para %s: %s', magenta(path), summary);
+      } else {
+        log.info('No se encontró contenido en la meta descripción para %s. No se generó resumen.', magenta(path));
+      }
+
+      // Insertamos el resumen después del div con clase "e-content article-entry"
+      const summaryTag = `<p>${summary}</p>`;
+      const divPattern = '<div class="e-content article-entry" itemprop="articleBody">';
+      content = content.replace(divPattern, `${divPattern}\n${summaryTag}`);
+
+      // Write cache data to public folder (actual HTML generation)
+      return writeFile(dest, Buffer.from(content)).then(() => {
         log.info('Generated: %s', magenta(path));
         return true;
       });
     });
   }
+
   deleteFile(path: string): Promise<void> {
     const { log } = this.context;
     const publicDir = this.context.public_dir;
@@ -125,6 +177,7 @@ class Generater {
       throw err;
     });
   }
+
   wrapDataStream(dataStream) {
     const { log } = this.context;
     // Pass original stream with all data and errors
@@ -139,6 +192,7 @@ class Generater {
 
     return dataStream.pipe(new PassThrough());
   }
+
   firstGenerate(): Promise<void> {
     const { concurrency } = this;
     const { route, log } = this.context;
@@ -151,7 +205,6 @@ class Generater {
 
     // Reset the timer for later usage
     this.start = process.hrtime();
-
 
     // Check the public folder
     return stat(publicDir).then(stats => {
@@ -184,6 +237,7 @@ class Generater {
       log.info('%d files generated in %s', count.toString(), cyan(interval));
     });
   }
+
   execWatch(): Promise<void> {
     const { route, log } = this.context;
     return this.context.watch().then(() => this.firstGenerate()).then(() => {
@@ -200,10 +254,12 @@ class Generater {
       });
     });
   }
+
   execDeploy() {
     return this.context.call('deploy', this.args);
   }
 }
+
 
 function generateConsole(this: Hexo, args: GenerateArgs = {}) {
   const generator = new Generater(this, args);
@@ -220,3 +276,4 @@ function generateConsole(this: Hexo, args: GenerateArgs = {}) {
 }
 
 export = generateConsole;
+  

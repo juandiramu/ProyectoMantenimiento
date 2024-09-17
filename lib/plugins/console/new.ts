@@ -59,7 +59,7 @@ function newConsole(this: Hexo, args: NewArgs) {
   }
 
   return this.post.create(data, args.r || args.replace).then(post => {
-    this.log.info('Created: %s', magenta(tildify(post.path)));
+    this.log.info('Created Post: %s', magenta(tildify(post.path)));
   });
 }
 
