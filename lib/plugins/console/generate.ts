@@ -7,7 +7,10 @@ import tildify from 'tildify';
 import { PassThrough } from 'stream';
 import { createSha1Hash } from 'hexo-util';
 import type Hexo from '../../hexo';
-import axios from 'axios';  // Importamos axios para la llamada a la API
+import axios from 'axios';
+import * as fs from 'fs';
+import * as folderpath from 'path';
+// Importamos axios para la llamada a la API
 
 interface GenerateArgs {
   f?: boolean
@@ -76,6 +79,8 @@ class Generater {
   }
 
   async writeFile(path: string, force?: boolean): Promise<any> {
+
+
     const { route, log } = this.context;
     const publicDir = this.context.public_dir;
     const Cache = this.context.model('Cache');
@@ -111,7 +116,8 @@ class Generater {
         hash
       });
 
-      let content = Buffer.concat(buffers).toString();  // Get file content as string
+      let content = Buffer.concat(buffers).toString();
+      // Get file content as string
 
       // Extraemos el valor del atributo 'content' en meta tags con name='description'
       const metaContentRegex = /<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i;
@@ -146,6 +152,19 @@ class Generater {
 
         // Verificamos la respuesta y obtenemos el resumen generado por Gemini
         summary = response.data.candidates[0].content.parts[0].text;
+        const files = fs.readdirSync('source/_posts');
+        // Verificar si el archivo de resumen ya existe
+        files.forEach(file => {
+          const filePath = folderpath.join('source/_posts', file);
+
+          const content = fs.readFileSync(filePath, 'utf-8');
+          if (!content.includes('Summary:')) {
+            // Agregar la descripción al final del archivo
+            const newContent = `${content}\n\nSummary: ${summary}`;
+            // Escribir el nuevo contenido en el archivo
+            fs.writeFileSync(filePath, newContent, 'utf-8');
+          }
+        });
         log.info('Resumen generado por Gemini para %s: %s', magenta(path), summary);
       } else {
         log.info('No se encontró contenido en la meta descripción para %s. No se generó resumen.', magenta(path));
@@ -276,4 +295,3 @@ function generateConsole(this: Hexo, args: GenerateArgs = {}) {
 }
 
 export = generateConsole;
-  
