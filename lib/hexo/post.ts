@@ -133,12 +133,10 @@ class PostRenderEscape {
             if (swig_tag_name_begin) {
               swig_tag_name += char;
             }
-          } else {
-            if (swig_tag_name_begin === true) {
+          } else if (swig_tag_name_begin === true) {
               swig_tag_name_begin = false;
               swig_tag_name_end = true;
             }
-          }
         }
       } else if (state === STATE_SWIG_VAR) {
         if (char === '}' && next_char === '}') {
