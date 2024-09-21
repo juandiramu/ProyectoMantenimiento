@@ -72,28 +72,14 @@ class Console {
 
     if (!fn) {
       if (options) {
-        if (typeof options === 'function') {
-          fn = options;
-
-          if (typeof desc === 'object') { // name, options, fn
-            options = desc;
-            desc = '';
-          } else { // name, desc, fn
-            options = {};
-          }
-        } else {
-          throw new TypeError('fn must be a function');
-        }
-      } else {
-        // name, fn
-        if (typeof desc === 'function') {
+        ({ options, fn, desc } = this.ValidateFunction(options, fn, desc));
+      } else if (typeof desc === 'function') {
           fn = desc;
           options = {};
           desc = '';
         } else {
           throw new TypeError('fn must be a function');
         }
-      }
     }
 
     if (fn.length > 1) {
@@ -108,6 +94,38 @@ class Console {
     c.desc = desc as string;
 
     this.alias = abbrev(Object.keys(this.store));
+  }
+
+  private ValidateFunction(options: Partial<{
+    usage: string; desc: string; init: boolean; arguments: {
+      name: string;
+      desc: string;
+    }[]; options: {
+      name: string;
+      desc: string;
+    }[];
+  }> | AnyFn, fn: AnyFn, desc: string | Partial<{
+    usage: string; desc: string; init: boolean; arguments: {
+      name: string;
+      desc: string;
+    }[]; options: {
+      name: string;
+      desc: string;
+    }[];
+  }> | AnyFn) {
+    if (typeof options === 'function') {
+      fn = options;
+
+      if (typeof desc === 'object') { // name, options, fn
+        options = desc;
+        desc = '';
+      } else { // name, desc, fn
+        options = {};
+      }
+    } else {
+      throw new TypeError('fn must be a function');
+    }
+    return { options, fn, desc };
   }
 }
 
