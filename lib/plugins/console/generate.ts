@@ -10,222 +10,186 @@ import type Hexo from '../../hexo';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as folderpath from 'path';
-// Importamos axios para la llamada a la API
 
 interface GenerateArgs {
-  f?: boolean
-  force?: boolean
-  b?: boolean
-  bail?: boolean
-  c?: string
-  concurrency?: string
-  w?: boolean
-  watch?: boolean
-  d?: boolean
-  deploy?: boolean
-  [key: string]: any
+  f?: boolean;
+  force?: boolean;
+  b?: boolean;
+  bail?: boolean;
+  c?: string;
+  concurrency?: string;
+  w?: boolean;
+  watch?: boolean;
+  d?: boolean;
+  deploy?: boolean;
+  [key: string]: any;
 }
 
 class Generater {
-  public context: Hexo;
-  public force: boolean;
-  public bail: boolean;
-  public concurrency: string;
-  public watch: boolean;
-  public deploy: boolean;
-  public generatingFiles: Set<any>;
-  public start: [number, number];
-  public args: GenerateArgs;
+  private readonly context: Hexo;
+  private readonly force: boolean;
+  private readonly bail: boolean;
+  private readonly concurrency: string;
+  private readonly watch: boolean;
+  private readonly deploy: boolean;
+  private readonly generatingFiles: Set<any>;
+  private start: [number, number];
+  private readonly args: GenerateArgs;
 
   constructor(ctx: Hexo, args: GenerateArgs) {
     this.context = ctx;
-    this.force = args.f || args.force;
-    this.bail = args.b || args.bail;
-    this.concurrency = args.c || args.concurrency;
-    this.watch = args.w || args.watch;
-    this.deploy = args.d || args.deploy;
+    this.force = args.f || args.force || false;
+    this.bail = args.b || args.bail || false;
+    this.concurrency = args.c || args.concurrency || 'Infinity';
+    this.watch = args.w || args.watch || false;
+    this.deploy = args.d || args.deploy || false;
     this.generatingFiles = new Set();
     this.start = process.hrtime();
     this.args = args;
   }
 
-  async generateFile(path: string) {
+  // Método para generar un archivo individual
+  async generateFile(path: string): Promise<void> {
     const publicDir = this.context.public_dir;
     const { generatingFiles } = this;
-    const { route } = this.context;
 
-    // Skip if the file is generating
-    if (generatingFiles.has(path)) return Promise.resolve();
+    if (generatingFiles.has(path)) return;
 
-    // Lock the file
     generatingFiles.add(path);
 
-    let promise;
+    const dest = join(publicDir, path);
+    const fileExists = await exists(dest);
 
-    if (this.force) {
-      promise = this.writeFile(path, true);
-    } else {
-      const dest = join(publicDir, path);
-      promise = exists(dest).then(exist => {
-        if (!exist) return this.writeFile(path, true);
-        if (route.isModified(path)) return this.writeFile(path);
-      });
-    }
-
-    return promise.finally(() => {
-      // Unlock the file
+    try {
+      if (!fileExists || this.force) {
+        await this.writeFile(path, true);
+      } else if (this.context.route.isModified(path)) {
+        await this.writeFile(path);
+      }
+    } finally {
       generatingFiles.delete(path);
-    });
+    }
   }
 
-  async writeFile(path: string, force?: boolean): Promise<any> {
-    const { route, log } = this.context;
-    const publicDir = this.context.public_dir;
+  // Método para escribir un archivo y generar el resumen si no existe
+  async writeFile(path: string, force: boolean = false): Promise<void> {
+    const { route, log, public_dir: publicDir } = this.context;
     const Cache = this.context.model('Cache');
     const dataStream = this.wrapDataStream(route.get(path));
-    const buffers = [];
+    const buffers: Buffer[] = [];
     const hasher = createSha1Hash();
-  
-    const finishedPromise = new Promise((resolve, reject) => {
+
+    const finishedPromise = new Promise<void>((resolve, reject) => {
       dataStream.once('error', reject);
       dataStream.once('end', resolve);
     });
-  
-    // Get data => Cache data => Calculate hash
+
     dataStream.on('data', chunk => {
       buffers.push(chunk);
       hasher.update(chunk);
     });
-  
-    return finishedPromise.then(async () => {
-      const dest = join(publicDir, path);
-      const cacheId = `public/${path}`;
-      const cache = Cache.findById(cacheId);
-      const hash = hasher.digest('hex');
-  
-      // Skip generating if hash is unchanged
-      if (!force && cache && cache.hash === hash) {
-        return;
-      }
-  
-      // Save new hash to cache
-      await Cache.save({
-        _id: cacheId,
-        hash
-      });
-  
-      let fileContent = Buffer.concat(buffers).toString();
-      // Get file content as string
-  
-      // Archivos a recorrer
-      const files = fs.readdirSync('source/_posts');
-  
-      // Usamos un bucle `for...of` para esperar correctamente las operaciones asíncronas dentro del bucle
-      for (const file of files) {
-        const filePath = folderpath.join('source/_posts', file);
-        let mdContent = fs.readFileSync(filePath, 'utf-8');
-  
-        // Verificamos si el archivo tiene un encabezado (front-matter)
-        const frontMatterRegex = /^---\n([\s\S]*?)\n---/;
-        const frontMatterMatch = mdContent.match(frontMatterRegex);
-  
-        // Verificamos si ya contiene un resumen
-        if (!mdContent.includes('Summary:')) {
-          let postContent = mdContent;
-  
-          // Si hay front-matter, extraemos solo el contenido del post
-          if (frontMatterMatch) {
-            postContent = mdContent.slice(frontMatterMatch[0].length).trim(); // Contenido sin el front-matter
-  
-            // Verificamos si el contenido del post está vacío o contiene solo espacios
-            if (!postContent) {
-              log.info('El archivo %s no tiene contenido después del front-matter. No se generará resumen.', magenta(filePath));
-              continue; // Saltamos a la siguiente iteración si no hay contenido
-            }
-          }
-          // Definimos el nuevo prompt para la IA
-          const prompt = `
-            Para una aplicación de generación de blogs, se desea tener al inicio de la página el resumen de la nueva entrada para el blog. 
-            A partir del siguiente texto, da el resumen que se debe poner al inicio para que los usuarios sepan de qué se trata. 
-            Evita poner cualquier cosa que no corresponda a lo que sería un resumen.
-            
-            Texto: ${postContent}
-          `;
-          // Generamos el resumen usando la IA (Gemini)
-          const response = await axios.post(
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=',
-            {
-              contents: [
-                {
-                  parts: [
-                    {
-                      text: prompt // Enviamos el contenido del post a la IA para generar el resumen
-                    }
-                  ]
-                }
-              ]
-            },
-            {
-              headers: {
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-  
-          // Verificamos la respuesta y obtenemos el resumen generado por Gemini
-          const summary = response.data.candidates[0].content.parts[0].text;
-  
-          // Si se encuentra front-matter, inserta el resumen después de él
-          if (frontMatterMatch) {
-            const frontMatter = frontMatterMatch[0]; // Captura el bloque de front-matter
-            postContent = mdContent.slice(frontMatterMatch[0].length).trim(); // El resto del contenido del post
-  
-            // Creamos el nuevo contenido, insertando el resumen después del front-matter
-            mdContent = `${frontMatter}\n\nSummary: ${summary}\n\n${postContent}`;
-          } else {
-            // Si no hay front-matter, añadimos el resumen al principio del archivo
-            mdContent = `Summary: ${summary}\n\n${mdContent}`;
-          }
-  
-          // Escribir el nuevo contenido en el archivo
-          fs.writeFileSync(filePath, mdContent, 'utf-8');
-  
-          log.info('Resumen generado por Gemini para %s: %s', magenta(filePath), summary);
-        } else {
-          log.info('El archivo %s ya contiene un resumen.', magenta(filePath));
-        }
-      }
-  
-      // Write cache data to public folder (actual HTML generation)
-      return writeFile(dest, Buffer.from(fileContent)).then(() => {
-        log.info('Generated: %s', magenta(path));
-        return true;
-      });
-    });
+
+    await finishedPromise;
+
+    const dest = join(publicDir, path);
+    const cacheId = `public/${path}`;
+    const cache = Cache.findById(cacheId);
+    const hash = hasher.digest('hex');
+
+    if (!force && cache?.hash === hash) {
+      return;
+    }
+
+    await Cache.save({ _id: cacheId, hash });
+
+    let fileContent = Buffer.concat(buffers).toString();
+    await this.processFiles(fileContent);
+    await writeFile(dest, Buffer.from(fileContent));
+
+    log.info('Generated: %s', magenta(path));
   }
 
+  // Método para procesar y generar resumen de los archivos
+  private async processFiles(fileContent: string): Promise<void> {
+    const files = fs.readdirSync('source/_posts');
+
+    for (const file of files) {
+      const filePath = folderpath.join('source/_posts', file);
+      let mdContent = fs.readFileSync(filePath, 'utf-8');
+
+      const frontMatterRegex = /^---\n([\s\S]*?)\n---/;
+      const frontMatterMatch = mdContent.match(frontMatterRegex);
+
+      if (!mdContent.includes('Summary:')) {
+        let postContent = mdContent;
+
+        if (frontMatterMatch) {
+          postContent = mdContent.slice(frontMatterMatch[0].length).trim();
+
+          if (!postContent) {
+            this.context.log.info('El archivo %s no tiene contenido después del front-matter. No se generará resumen.', magenta(filePath));
+            continue;
+          }
+        }
+
+        const summary = await this.generateSummary(postContent);
+        mdContent = this.insertSummary(mdContent, frontMatterMatch, summary);
+
+        fs.writeFileSync(filePath, mdContent, 'utf-8');
+        this.context.log.info('Resumen generado para %s', magenta(filePath));
+      }
+    }
+  }
+
+  // Método que genera el resumen usando la IA
+  private async generateSummary(postContent: string): Promise<string> {
+    const prompt = `
+      Para una aplicación de generación de blogs, se desea tener al inicio de la página el resumen de la nueva entrada para el blog. 
+      A partir del siguiente texto, da el resumen que se debe poner al inicio para que los usuarios sepan de qué se trata. 
+      Evita poner cualquier cosa que no corresponda a lo que sería un resumen.
+      
+      Texto: ${postContent}
+    `;
+
+    const response = await axios.post(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=AIzaSyDMuWU-2pwUPczv8fyJ5l84czbExrZZC3k',
+      { contents: [{ parts: [{ text: prompt }] }] },
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+
+    return response.data.candidates[0].content.parts[0].text;
+  }
+
+  // Método que inserta el resumen en el archivo
+  private insertSummary(mdContent: string, frontMatterMatch: RegExpMatchArray | null, summary: string): string {
+    if (frontMatterMatch) {
+      const frontMatter = frontMatterMatch[0];
+      const postContent = mdContent.slice(frontMatterMatch[0].length).trim();
+      return `${frontMatter}\n\nSummary: ${summary}\n\n${postContent}`;
+    } else {
+      return `Summary: ${summary}\n\n${mdContent}`;
+    }
+  }
+
+  // Métodos auxiliares para gestión de archivos y procesos
   deleteFile(path: string): Promise<void> {
-    const { log } = this.context;
-    const publicDir = this.context.public_dir;
+    const { log, public_dir: publicDir } = this.context;
     const dest = join(publicDir, path);
 
     return unlink(dest).then(() => {
       log.info('Deleted: %s', magenta(path));
-    }, err => {
-      // Skip ENOENT errors (file was deleted)
-      if (err && err.code === 'ENOENT') return;
-      throw err;
+    }).catch(err => {
+      if (err.code !== 'ENOENT') throw err;
     });
   }
 
-  wrapDataStream(dataStream) {
+  wrapDataStream(dataStream: NodeJS.ReadableStream) {
     const { log } = this.context;
-    // Pass original stream with all data and errors
+
     if (this.bail) {
       return dataStream;
     }
 
-    // Pass all data, but don't populate errors
     dataStream.on('error', err => {
       log.error(err);
     });
@@ -234,64 +198,33 @@ class Generater {
   }
 
   firstGenerate(): Promise<void> {
-    const { concurrency } = this;
-    const { route, log } = this.context;
-    const publicDir = this.context.public_dir;
+    const { concurrency, route, log, public_dir: publicDir } = this.context;
     const Cache = this.context.model('Cache');
 
-    // Show the loading time
-    const interval = prettyHrtime(process.hrtime(this.start));
-    log.info('Files loaded in %s', cyan(interval));
+    log.info('Files loaded in %s', cyan(prettyHrtime(process.hrtime(this.start))));
 
-    // Reset the timer for later usage
-    this.start = process.hrtime();
-
-    // Check the public folder
     return stat(publicDir).then(stats => {
-      if (!stats.isDirectory()) {
-        throw new Error(`${magenta(tildify(publicDir))} is not a directory`);
-      }
+      if (!stats.isDirectory()) throw new Error(`${magenta(tildify(publicDir))} is not a directory`);
     }).catch(err => {
-      // Create public folder if not exists
-      if (err && err.code === 'ENOENT') {
-        return mkdirs(publicDir);
-      }
-
+      if (err.code === 'ENOENT') return mkdirs(publicDir);
       throw err;
     }).then(() => {
-      const task = (fn, path) => () => fn.call(this, path);
-      const doTask = fn => fn();
-      const routeList = route.list();
-      const publicFiles = Cache.filter(item => item._id.startsWith('public/')).map(item => item._id.substring(7));
-      const tasks = publicFiles.filter(path => !routeList.includes(path))
-        // Clean files
-        .map(path => task(this.deleteFile, path))
-        // Generate files
-        .concat(routeList.map(path => task(this.generateFile, path)));
+      const tasks = Cache.filter(item => item._id.startsWith('public/'))
+        .map(item => item._id.substring(7))
+        .filter(path => !route.list().includes(path))
+        .map(path => () => this.deleteFile(path))
+        .concat(route.list().map(path => () => this.generateFile(path)));
 
-      return Promise.all(Promise.map(tasks, doTask, { concurrency: parseFloat(concurrency || 'Infinity') }));
+      return Promise.map(tasks, task => task(), { concurrency: parseFloat(concurrency) });
     }).then(result => {
-      const interval = prettyHrtime(process.hrtime(this.start));
       const count = result.filter(Boolean).length;
-
-      log.info('%d files generated in %s', count.toString(), cyan(interval));
+      log.info('%d files generated in %s', count.toString(), cyan(prettyHrtime(process.hrtime(this.start))));
     });
   }
 
   execWatch(): Promise<void> {
-    const { route, log } = this.context;
     return this.context.watch().then(() => this.firstGenerate()).then(() => {
-      log.info('Hexo is watching for file changes. Press Ctrl+C to exit.');
-
-      // Watch changes of the route
-      route.on('update', path => {
-        const modified = route.isModified(path);
-        if (!modified) return;
-
-        this.generateFile(path);
-      }).on('remove', path => {
-        this.deleteFile(path);
-      });
+      this.context.log.info('Hexo is watching for file changes. Press Ctrl+C to exit.');
     });
   }
 
@@ -300,7 +233,7 @@ class Generater {
   }
 }
 
-
+// Método de entrada para el comando
 function generateConsole(this: Hexo, args: GenerateArgs = {}) {
   const generator = new Generater(this, args);
 
